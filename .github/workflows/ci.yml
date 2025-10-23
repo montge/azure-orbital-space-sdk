@@ -89,6 +89,35 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
+      - name: Clone and build microsoftazurespacefx SDK
+        run: |
+          echo "=========================================="
+          echo "Building microsoftazurespacefx SDK locally"
+          echo "=========================================="
+
+          # Clone the SDK client repository
+          cd ${{ github.workspace }}
+          git clone --depth 1 https://github.com/microsoft/azure-orbital-space-sdk-client.git /tmp/sdk-client
+
+          cd /tmp/sdk-client
+
+          # Create minimal protos directory structure
+          mkdir -p spacefx/protos
+          touch spacefx/protos/__init__.py
+
+          # Temporarily allow Python 3.12 for building
+          sed -i 's/python = ">=3.8,<3.12"/python = ">=3.8,<3.13"/' pyproject.toml
+
+          # Build the SDK wheel
+          poetry build
+
+          # Copy wheel to a known location
+          mkdir -p ${{ github.workspace }}/.sdk-wheels
+          cp dist/*.whl ${{ github.workspace }}/.sdk-wheels/
+
+          echo "✅ SDK wheel built and cached"
+          ls -lh ${{ github.workspace }}/.sdk-wheels/
+
       - name: Configure Poetry for GitHub Packages
         run: |
           # Configure Poetry to authenticate with GitHub Packages
@@ -128,6 +157,12 @@ jobs:
               echo "----------------------------------------"
 
               cd "$project_dir"
+
+              # Install the locally built SDK wheel first
+              if [ -f "${{ github.workspace }}/.sdk-wheels/microsoftazurespacefx-0.11.0-py3-none-any.whl" ]; then
+                echo "Installing microsoftazurespacefx from local wheel..."
+                poetry run pip install "${{ github.workspace }}/.sdk-wheels/microsoftazurespacefx-0.11.0-py3-none-any.whl"
+              fi
 
               # Install dependencies
               echo "Installing dependencies..."
