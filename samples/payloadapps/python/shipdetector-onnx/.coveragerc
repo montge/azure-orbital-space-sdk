@@ -1,0 +1,35 @@
+[run]
+# Coverage.py configuration for shipdetector-onnx
+source = src/app
+omit =
+    */tests/*
+    */test_*.py
+    */__pycache__/*
+    */.venv/*
+    */venv/*
+
+[report]
+# Reporting options
+precision = 2
+show_missing = True
+skip_covered = False
+
+# Fail if coverage is below threshold
+fail_under = 25
+
+# Exclude lines from coverage
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    @abc.abstractmethod
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml

@@ -1,0 +1,14 @@
+# Editor configuration for test files
+
+root = false
+
+[*.cs]
+# Test files can exclude certain rules
+dotnet_diagnostic.CA1707.severity = none  # Underscores in test method names are acceptable
+dotnet_diagnostic.CA1822.severity = none  # Test methods don't need to be static
+
+# Async test naming
+dotnet_naming_rule.async_methods_end_in_async.severity = none
+
+# Test-specific patterns
+dotnet_code_quality.ca1707.api_surface = private, internal

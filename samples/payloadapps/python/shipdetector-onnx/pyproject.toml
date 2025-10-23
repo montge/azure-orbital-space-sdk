@@ -33,6 +33,9 @@ priority = "supplemental"
 
 [tool.poetry.group.spacefx-dev.dependencies]
 pytest = "^7.2.1"
+pytest-cov = "^4.0.0"
+pytest-asyncio = "^0.21.0"
+pytest-mock = "^3.10.0"
 pip = "*"
 setuptools = "*"
 wheel = "*"
