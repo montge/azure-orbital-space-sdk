@@ -13,7 +13,7 @@ from = "src"
 path = ".protos/datagenerator/planetary_computer"
 
 [tool.poetry.dependencies]
-python = ">=3.8,<3.12"
+python = ">=3.9,<3.14"
 onnx = "*"
 onnxruntime = "*"
 Pillow = "*"

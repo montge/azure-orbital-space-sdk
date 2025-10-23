@@ -161,7 +161,7 @@ watch -n 2 tree /var/spacedev/xfer/<app-name>
 /samples/
   ├── payloadapps/           # Sample applications
   │   ├── dotnet/            # .NET apps (net8.0)
-  │   └── python/            # Python apps (3.8-3.11)
+  │   └── python/            # Python apps (3.9-3.13 LTS)
   ├── plugins/               # Service extension plugins
   │   ├── hostsvc/           # Host service plugins
   │   ├── platform/          # Platform service plugins

@@ -26,7 +26,7 @@ Add these badges to your main README.md:
 - Manual workflow dispatch
 
 **Jobs:**
-- **Python Tests** - Run pytest across Python 3.8-3.11
+- **Python Tests** - Run pytest across Python 3.9-3.13 (LTS versions)
 - **Python Linting** - Black, isort, Flake8
 - **.NET Tests** - Build and test .NET 8.0 projects
 - **.NET Formatting** - Code formatting validation
@@ -35,7 +35,7 @@ Add these badges to your main README.md:
 - **CI Summary** - Overall status and PR comments
 
 **Key Features:**
-- Multi-version testing (Python 3.8-3.11, .NET 8.0)
+- Multi-version testing (Python 3.9-3.13 LTS, .NET 8.0 LTS)
 - Dependency caching for faster builds
 - Test coverage reporting
 - Type checking with mypy
@@ -357,7 +357,7 @@ Workflows use GitHub Actions cache to speed up builds:
 Edit `ci.yml`:
 ```yaml
 matrix:
-  python-version: ['3.8', '3.9', '3.10', '3.11', '3.12']  # Add 3.12
+  python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']  # Python LTS versions
 ```
 
 ### Changing Container Architectures

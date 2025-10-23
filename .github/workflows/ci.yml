@@ -4,8 +4,8 @@ name: "CI - Build and Test"
 # Continuous Integration Pipeline for Azure Orbital Space SDK
 #
 # This workflow provides comprehensive testing and validation for:
-# - Python applications (Poetry-based, Python 3.8-3.11)
-# - .NET applications (.NET 8.0)
+# - Python applications (Poetry-based, Python 3.9-3.13 LTS)
+# - .NET applications (.NET 8.0 LTS)
 # - Sample applications and plugins
 # - Code quality and formatting
 # - Test coverage reporting
@@ -67,8 +67,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Test against all supported Python versions per CLAUDE.md
-        python-version: ['3.8', '3.9', '3.10', '3.11']
+        # Test against current Python LTS versions (3.9-3.13)
+        # Python 3.8 reached EOL in October 2024
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
 
     steps:
       - name: Checkout repository
@@ -105,8 +106,8 @@ jobs:
           mkdir -p spacefx/protos
           touch spacefx/protos/__init__.py
 
-          # Temporarily allow Python 3.12 for building
-          sed -i 's/python = ">=3.8,<3.12"/python = ">=3.8,<3.13"/' pyproject.toml
+          # Update Python version constraint to support 3.9-3.13
+          sed -i 's/python = ">=3.8,<3.12"/python = ">=3.9,<3.14"/' pyproject.toml
 
           # Build the SDK wheel
           poetry build
