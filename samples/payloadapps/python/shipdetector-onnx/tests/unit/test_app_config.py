@@ -235,7 +235,7 @@ class TestAppConfigFileValidation:
 
         # Act & Assert
         with pytest.raises(FileNotFoundError, match="model.onnx"):
-            with patch('time.time', side_effect=[0, 121]):
+            with patch('time.time', side_effect=[0, 0, 121, 121]):
                 AppConfig(file_path=str(config_file))
 
     @pytest.mark.unit
@@ -268,7 +268,7 @@ class TestAppConfigFileValidation:
 
         # Act & Assert
         with pytest.raises(FileNotFoundError, match="labels.txt"):
-            with patch('time.time', side_effect=[0, 121]):
+            with patch('time.time', side_effect=[0, 0, 121, 121]):
                 AppConfig(file_path=str(config_file))
 
 
@@ -470,9 +470,8 @@ class TestAppConfigEdgeCases:
         config = AppConfig(file_path=str(config_file))
 
         # Assert
-        # Empty file results in list with single empty string after strip
-        assert len(config.DETECTION_LABELS) == 1
-        assert config.DETECTION_LABELS[0] == ""
+        # Empty file results in empty list (no lines to read)
+        assert len(config.DETECTION_LABELS) == 0
 
     @pytest.mark.unit
     def test_labels_with_whitespace(self, temp_dir):

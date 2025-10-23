@@ -95,9 +95,9 @@ jobs:
           echo "Building microsoftazurespacefx SDK locally"
           echo "=========================================="
 
-          # Clone the SDK client repository
+          # Clone the SDK client repository from montge fork
           cd ${{ github.workspace }}
-          git clone --depth 1 https://github.com/microsoft/azure-orbital-space-sdk-client.git /tmp/sdk-client
+          git clone --depth 1 https://github.com/montge/azure-orbital-space-sdk-client.git /tmp/sdk-client
 
           cd /tmp/sdk-client
 
