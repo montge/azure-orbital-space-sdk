@@ -28,14 +28,14 @@ Add these badges to your main README.md:
 **Jobs:**
 - **Python Tests** - Run pytest across Python 3.8-3.11
 - **Python Linting** - Black, isort, Flake8
-- **.NET Tests** - Build and test .NET 6.0 and 8.0 projects
+- **.NET Tests** - Build and test .NET 8.0 projects
 - **.NET Formatting** - Code formatting validation
 - **Sample Validation** - Validate sample application structure
 - **Script Validation** - Shellcheck for bash scripts
 - **CI Summary** - Overall status and PR comments
 
 **Key Features:**
-- Multi-version testing (Python 3.8-3.11, .NET 6.0/8.0)
+- Multi-version testing (Python 3.8-3.11, .NET 8.0)
 - Dependency caching for faster builds
 - Test coverage reporting
 - Type checking with mypy

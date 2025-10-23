@@ -5,7 +5,7 @@ name: "CI - Build and Test"
 #
 # This workflow provides comprehensive testing and validation for:
 # - Python applications (Poetry-based, Python 3.8-3.11)
-# - .NET applications (.NET 6.0 and 8.0)
+# - .NET applications (.NET 8.0)
 # - Sample applications and plugins
 # - Code quality and formatting
 # - Test coverage reporting
@@ -242,8 +242,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Test both .NET versions used in the SDK
-        dotnet-version: ['6.0.x', '8.0.x']
+        # Test .NET 8.0 LTS (supported until November 2026)
+        dotnet-version: ['8.0.x']
 
     steps:
       - name: Checkout repository

@@ -57,3 +57,15 @@ CPU and Memory Metrics for a 30 day run (x64, 4 cores, 2GB Ram)
 - Docker v24.0.7+
 - DevContainer Extension v0.338.1+
 - Ubuntu 20.04+
+
+### Software Requirements
+
+- **.NET 8.0 SDK** - Required for building .NET applications and plugins
+  - Download: [https://dotnet.microsoft.com/download/dotnet/8.0](https://dotnet.microsoft.com/download/dotnet/8.0)
+  - Verify installation: `dotnet --version` (should show 8.0.x)
+  - Note: .NET 6.0 reached end of support on November 12, 2024
+- **Python 3.8-3.11** - Required for Python applications
+  - Poetry 1.3.2+ for dependency management
+- **Git** - For version control and repository management
+
+For .NET migration information, see the [.NET 8.0 Migration Guide](../migration/NET8-UPGRADE-GUIDE.md).

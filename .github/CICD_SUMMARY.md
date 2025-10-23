@@ -25,7 +25,7 @@ A comprehensive, production-ready GitHub Actions CI/CD pipeline has been created
 **Jobs (11 total):**
 1. **python-test** - Test Python apps on versions 3.8-3.11
 2. **python-lint** - Black, isort, Flake8 linting
-3. **dotnet-test** - .NET 6.0 and 8.0 builds and tests
+3. **dotnet-test** - .NET 8.0 builds and tests
 4. **dotnet-format** - Code formatting validation
 5. **validate-samples** - Sample structure validation
 6. **validate-scripts** - Shellcheck for bash scripts
@@ -309,7 +309,7 @@ Add to your README.md:
 
 ### 1. Multi-Language Support
 - ✅ Python 3.8, 3.9, 3.10, 3.11
-- ✅ .NET 6.0, 8.0
+- ✅ .NET 8.0 (LTS, supported until November 2026)
 - ✅ Poetry-based Python projects
 - ✅ MSBuild/.csproj projects
 
