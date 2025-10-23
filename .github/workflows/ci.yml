@@ -106,8 +106,8 @@ jobs:
           mkdir -p spacefx/protos
           touch spacefx/protos/__init__.py
 
-          # Update Python version constraint to support 3.9-3.13
-          sed -i 's/python = ">=3.8,<3.12"/python = ">=3.9,<3.14"/' pyproject.toml
+          # Python version constraint should already be correct in montge fork
+          # No sed modification needed - fork has been updated to support 3.9-3.14
 
           # Build the SDK wheel
           poetry build
