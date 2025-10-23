@@ -89,6 +89,11 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
+      - name: Configure Poetry for GitHub Packages
+        run: |
+          # Configure Poetry to authenticate with GitHub Packages
+          poetry config http-basic.github-montge montge ${{ secrets.GITHUB_TOKEN }}
+
       - name: Cache Poetry dependencies
         uses: actions/cache@v4
         with:
@@ -256,6 +261,23 @@ jobs:
         with:
           dotnet-version: ${{ matrix.dotnet-version }}
 
+      - name: Create spacefx_version file
+        run: |
+          # Create the spacefx_version file that .csproj files reference
+          # This file is normally created by the devcontainer environment
+          sudo mkdir -p /spacefx-dev/config
+          echo "0.11.0" | sudo tee /spacefx-dev/config/spacefx_version
+
+      - name: Configure NuGet for GitHub Packages
+        run: |
+          # Add GitHub Packages as NuGet source with authentication
+          dotnet nuget add source \
+            --name github-montge \
+            --username montge \
+            --password ${{ secrets.GITHUB_TOKEN }} \
+            --store-password-in-clear-text \
+            "https://nuget.pkg.github.com/montge/index.json" || echo "Source might already exist"
+
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
@@ -371,6 +393,11 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
+      - name: Create spacefx_version file
+        run: |
+          sudo mkdir -p /spacefx-dev/config
+          echo "0.11.0" | sudo tee /spacefx-dev/config/spacefx_version
 
       - name: Install dotnet-format
         run: dotnet tool install -g dotnet-format
