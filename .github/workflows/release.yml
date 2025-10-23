@@ -1,0 +1,604 @@
+name: "Release"
+
+# ============================================================================
+# Automated Release Pipeline
+#
+# This workflow handles:
+# - Semantic versioning
+# - Automated changelog generation
+# - GitHub release creation
+# - Container image tagging and publishing
+# - Python wheel distribution (if applicable)
+# - .NET NuGet package publishing (if applicable)
+# - Release artifact packaging
+# ============================================================================
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v1.2.3)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: 'Create as draft release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+  issues: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ============================================================================
+  # Validate Release Prerequisites
+  # ============================================================================
+  validate-release:
+    name: "Validate Release"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      version-number: ${{ steps.get-version.outputs.version-number }}
+      is-prerelease: ${{ steps.check-prerelease.outputs.is-prerelease }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from tag or input
+        id: get-version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+
+          # Remove 'v' prefix for version number
+          VERSION_NUMBER="${VERSION#v}"
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version-number=$VERSION_NUMBER" >> $GITHUB_OUTPUT
+
+          echo "Release Version: $VERSION"
+          echo "Version Number: $VERSION_NUMBER"
+
+      - name: Check if pre-release
+        id: check-prerelease
+        run: |
+          VERSION="${{ steps.get-version.outputs.version }}"
+
+          if [[ "$VERSION" =~ -(alpha|beta|rc) ]] || [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
+            echo "is-prerelease=true" >> $GITHUB_OUTPUT
+            echo "This is a pre-release version"
+          else
+            echo "is-prerelease=false" >> $GITHUB_OUTPUT
+            echo "This is a stable release"
+          fi
+
+      - name: Validate version format
+        run: |
+          VERSION="${{ steps.get-version.outputs.version-number }}"
+
+          # Validate semantic versioning format
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+\.[0-9]+)?$ ]]; then
+            echo "❌ Invalid version format: $VERSION"
+            echo "Expected format: X.Y.Z or X.Y.Z-prerelease.N"
+            exit 1
+          fi
+
+          echo "✅ Version format is valid"
+
+      - name: Check for existing release
+        run: |
+          VERSION="${{ steps.get-version.outputs.version }}"
+
+          # Check if release already exists
+          if gh release view "$VERSION" &>/dev/null; then
+            echo "⚠️  Release $VERSION already exists"
+
+            if [ "${{ github.event.inputs.draft }}" != "true" ]; then
+              echo "❌ Cannot create duplicate release"
+              exit 1
+            fi
+
+            echo "ℹ️  Will update existing draft release"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # ============================================================================
+  # Run Full Test Suite Before Release
+  # ============================================================================
+  pre-release-tests:
+    name: "Pre-Release Testing"
+    needs: validate-release
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ github.ref }}
+
+  # ============================================================================
+  # Generate Changelog
+  # ============================================================================
+  generate-changelog:
+    name: "Generate Changelog"
+    runs-on: ubuntu-latest
+    needs: validate-release
+    timeout-minutes: 10
+    outputs:
+      changelog: ${{ steps.changelog.outputs.changelog }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION="${{ needs.validate-release.outputs.version }}"
+
+          echo "Generating changelog for $VERSION..."
+
+          # Get previous tag
+          PREVIOUS_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | head -2 | tail -1)
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous tag found, using all history"
+            PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+
+          echo "Comparing $PREVIOUS_TAG...$VERSION"
+
+          # Generate changelog
+          CHANGELOG=$(cat <<EOF
+          ## What's Changed
+
+          ### Features
+          $(git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s (%h)" --grep="^feat" --grep="^feature" || echo "No new features")
+
+          ### Bug Fixes
+          $(git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s (%h)" --grep="^fix" || echo "No bug fixes")
+
+          ### Documentation
+          $(git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s (%h)" --grep="^docs" || echo "No documentation changes")
+
+          ### Performance
+          $(git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s (%h)" --grep="^perf" || echo "No performance improvements")
+
+          ### Refactoring
+          $(git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s (%h)" --grep="^refactor" || echo "No refactoring")
+
+          ### Other Changes
+          $(git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s (%h)" --invert-grep --grep="^feat" --grep="^fix" --grep="^docs" --grep="^perf" --grep="^refactor" | head -10)
+
+          ### Contributors
+          $(git log $PREVIOUS_TAG..HEAD --pretty=format:"- @%an" | sort -u)
+
+          **Full Changelog**: https://github.com/${{ github.repository }}/compare/$PREVIOUS_TAG...$VERSION
+          EOF
+          )
+
+          # Save to file
+          echo "$CHANGELOG" > changelog.md
+
+          # Set output (escape for GitHub Actions)
+          {
+            echo 'changelog<<EOF'
+            echo "$CHANGELOG"
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+          echo "✅ Changelog generated"
+
+      - name: Upload changelog
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog
+          path: changelog.md
+          retention-days: 90
+
+  # ============================================================================
+  # Build Release Artifacts
+  # ============================================================================
+  build-release-artifacts:
+    name: "Build Release Artifacts"
+    runs-on: ubuntu-latest
+    needs: [validate-release, pre-release-tests]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.3.2
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            8.0.x
+
+      - name: Create release directory
+        run: |
+          mkdir -p release-artifacts
+          VERSION="${{ needs.validate-release.outputs.version-number }}"
+          echo "$VERSION" > release-artifacts/VERSION
+
+      - name: Package sample applications
+        run: |
+          echo "Packaging sample applications..."
+
+          VERSION="${{ needs.validate-release.outputs.version }}"
+
+          # Package Python samples
+          for sample_dir in samples/payloadapps/python/*/; do
+            if [ -d "$sample_dir" ]; then
+              sample_name=$(basename "$sample_dir")
+              echo "Packaging: $sample_name"
+
+              tar -czf "release-artifacts/${sample_name}-${VERSION}.tar.gz" \
+                -C "$(dirname "$sample_dir")" \
+                "$sample_name" \
+                --exclude='*.pyc' \
+                --exclude='__pycache__' \
+                --exclude='.venv' \
+                --exclude='.pytest_cache'
+            fi
+          done
+
+          # Package .NET samples
+          for sample_dir in samples/payloadapps/dotnet/*/; do
+            if [ -d "$sample_dir" ]; then
+              sample_name=$(basename "$sample_dir")
+              echo "Packaging: $sample_name"
+
+              tar -czf "release-artifacts/${sample_name}-${VERSION}.tar.gz" \
+                -C "$(dirname "$sample_dir")" \
+                "$sample_name" \
+                --exclude='bin' \
+                --exclude='obj' \
+                --exclude='.vs'
+            fi
+          done
+
+          echo "✅ Sample applications packaged"
+
+      - name: Package plugin templates
+        run: |
+          echo "Packaging plugin templates..."
+
+          VERSION="${{ needs.validate-release.outputs.version }}"
+
+          # Package all plugin starters
+          tar -czf "release-artifacts/plugin-templates-${VERSION}.tar.gz" \
+            samples/plugins/ \
+            --exclude='bin' \
+            --exclude='obj' \
+            --exclude='.vs' \
+            --exclude='debugPayloadApp'
+
+          echo "✅ Plugin templates packaged"
+
+      - name: Package scripts
+        run: |
+          echo "Packaging scripts..."
+
+          VERSION="${{ needs.validate-release.outputs.version }}"
+
+          tar -czf "release-artifacts/scripts-${VERSION}.tar.gz" \
+            scripts/
+
+          echo "✅ Scripts packaged"
+
+      - name: Package documentation
+        run: |
+          echo "Packaging documentation..."
+
+          VERSION="${{ needs.validate-release.outputs.version }}"
+
+          tar -czf "release-artifacts/documentation-${VERSION}.tar.gz" \
+            docs/ \
+            README.md \
+            CONTRIBUTING.md \
+            CLAUDE.md \
+            --exclude='.git'
+
+          echo "✅ Documentation packaged"
+
+      - name: Generate checksums
+        run: |
+          echo "Generating checksums..."
+
+          cd release-artifacts
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          cd ..
+
+          echo "✅ Checksums generated"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: release-artifacts/
+          retention-days: 90
+
+  # ============================================================================
+  # Build and Push Container Images
+  # ============================================================================
+  build-release-containers:
+    name: "Build Release Containers"
+    needs: [validate-release, pre-release-tests]
+    uses: ./.github/workflows/container-build.yml
+    secrets: inherit
+    with:
+      push_images: true
+      architectures: 'linux/amd64,linux/arm64'
+
+  # ============================================================================
+  # Create GitHub Release
+  # ============================================================================
+  create-release:
+    name: "Create GitHub Release"
+    runs-on: ubuntu-latest
+    needs:
+      - validate-release
+      - pre-release-tests
+      - generate-changelog
+      - build-release-artifacts
+      - build-release-containers
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: release-artifacts/
+
+      - name: Download changelog
+        uses: actions/download-artifact@v4
+        with:
+          name: changelog
+
+      - name: Create release notes
+        run: |
+          VERSION="${{ needs.validate-release.outputs.version }}"
+          VERSION_NUMBER="${{ needs.validate-release.outputs.version-number }}"
+
+          cat > release-notes.md <<EOF
+          # Azure Orbital Space SDK $VERSION
+
+          ## Overview
+          This release includes sample applications, plugins, documentation, and container images for the Azure Orbital Space SDK.
+
+          ## Installation
+
+          ### Docker Images
+          Container images are available at:
+          \`\`\`bash
+          docker pull ghcr.io/${{ github.repository_owner }}/spacefx-<app-name>:$VERSION_NUMBER
+          \`\`\`
+
+          ### Sample Applications
+          Download and extract the sample application archives below.
+
+          ### Scripts
+          Download the scripts archive to access the latest build and deployment utilities.
+
+          ## Release Artifacts
+
+          - **Sample Applications**: Python and .NET sample payload applications
+          - **Plugin Templates**: Starter templates for host service and platform plugins
+          - **Scripts**: Build and deployment scripts
+          - **Documentation**: Complete SDK documentation
+          - **Container Images**: Multi-architecture (amd64/arm64) container images
+
+          All artifacts include SHA256 checksums for verification.
+
+          $(cat changelog.md)
+
+          ## Verification
+
+          Verify artifact checksums:
+          \`\`\`bash
+          sha256sum -c SHA256SUMS.txt
+          \`\`\`
+
+          ## Support
+
+          - [Documentation](https://github.com/${{ github.repository }}/tree/main/docs)
+          - [Issues](https://github.com/${{ github.repository }}/issues)
+          - [Contributing](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md)
+
+          ---
+          Released: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
+
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: "Release ${{ needs.validate-release.outputs.version }}"
+          tag_name: ${{ needs.validate-release.outputs.version }}
+          body_path: release-notes.md
+          draft: ${{ github.event.inputs.draft == 'true' }}
+          prerelease: ${{ needs.validate-release.outputs.is-prerelease }}
+          files: |
+            release-artifacts/*.tar.gz
+            release-artifacts/SHA256SUMS.txt
+            release-artifacts/VERSION
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update latest release (if stable)
+        if: needs.validate-release.outputs.is-prerelease == 'false'
+        run: |
+          echo "Updating 'latest' release pointer..."
+
+          # Tag as latest in container registry is handled by container-build workflow
+          # This just confirms the release was created successfully
+
+          echo "✅ Release created: ${{ needs.validate-release.outputs.version }}"
+
+  # ============================================================================
+  # Post-Release Actions
+  # ============================================================================
+  post-release:
+    name: "Post-Release Actions"
+    runs-on: ubuntu-latest
+    needs:
+      - validate-release
+      - create-release
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create release announcement issue
+        if: needs.validate-release.outputs.is-prerelease == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ needs.validate-release.outputs.version }}';
+
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `📢 Release ${version} is now available`,
+              body: `## Release ${version} is Now Available! 🎉
+
+            We're excited to announce the release of Azure Orbital Space SDK ${version}.
+
+            ### Download
+
+            Get the latest release:
+            - [Release page](https://github.com/${{ github.repository }}/releases/tag/${version})
+            - Container images: \`ghcr.io/${{ github.repository_owner }}/spacefx-*:${{ needs.validate-release.outputs.version-number }}\`
+
+            ### What's Included
+
+            - ✅ Sample applications (Python & .NET)
+            - ✅ Plugin templates
+            - ✅ Build and deployment scripts
+            - ✅ Complete documentation
+            - ✅ Multi-architecture container images (amd64/arm64)
+
+            ### Getting Started
+
+            Check out our [documentation](https://github.com/${{ github.repository }}/tree/main/docs) to get started.
+
+            ### Questions or Issues?
+
+            - Report bugs: [Issues](https://github.com/${{ github.repository }}/issues)
+            - Contribute: [Contributing Guide](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md)
+
+            Happy developing! 🚀
+            `,
+              labels: ['release', 'announcement']
+            });
+
+            console.log(`Created announcement issue #${issue.data.number}`);
+
+      - name: Notify on release failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '❌ Release ${{ needs.validate-release.outputs.version }} failed',
+              body: `## Release Failed
+
+            The automated release workflow for version ${{ needs.validate-release.outputs.version }} has failed.
+
+            **Action Required:**
+            1. Review the [failed workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            2. Identify and fix the issue
+            3. Re-trigger the release workflow
+
+            This issue was automatically created by the release workflow.
+            `,
+              labels: ['release', 'bug', 'automated'],
+              assignees: []
+            });
+
+  # ============================================================================
+  # Release Summary
+  # ============================================================================
+  release-summary:
+    name: "Release Summary"
+    runs-on: ubuntu-latest
+    needs:
+      - validate-release
+      - pre-release-tests
+      - generate-changelog
+      - build-release-artifacts
+      - build-release-containers
+      - create-release
+      - post-release
+    if: always()
+
+    steps:
+      - name: Print release summary
+        run: |
+          echo "=========================================="
+          echo "Release Pipeline Summary"
+          echo "=========================================="
+          echo "Version: ${{ needs.validate-release.outputs.version }}"
+          echo "Pre-release: ${{ needs.validate-release.outputs.is-prerelease }}"
+          echo ""
+          echo "Validation: ${{ needs.validate-release.result }}"
+          echo "Tests: ${{ needs.pre-release-tests.result }}"
+          echo "Changelog: ${{ needs.generate-changelog.result }}"
+          echo "Artifacts: ${{ needs.build-release-artifacts.result }}"
+          echo "Containers: ${{ needs.build-release-containers.result }}"
+          echo "Release: ${{ needs.create-release.result }}"
+          echo "Post-Release: ${{ needs.post-release.result }}"
+          echo "=========================================="
+
+          if [ "${{ needs.create-release.result }}" = "success" ]; then
+            echo "✅ Release ${{ needs.validate-release.outputs.version }} completed successfully!"
+            echo ""
+            echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.validate-release.outputs.version }}"
+          else
+            echo "❌ Release failed - check job outputs above"
+            exit 1
+          fi

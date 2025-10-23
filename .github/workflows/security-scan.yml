@@ -1,0 +1,575 @@
+name: "Security Scanning"
+
+# ============================================================================
+# Comprehensive Security Scanning Pipeline
+#
+# This workflow provides security scanning beyond CodeQL including:
+# - Dependency vulnerability scanning (Python, .NET)
+# - Container image vulnerability scanning (Trivy)
+# - Secret scanning
+# - License compliance checking
+# - Supply chain security (SBOM generation)
+# ============================================================================
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    # Run daily at 02:00 UTC to catch newly disclosed vulnerabilities
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allow manual triggering for security audits
+
+# Prevent concurrent security scans
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  # ============================================================================
+  # Python Dependency Vulnerability Scanning
+  # ============================================================================
+  python-security:
+    name: "Python Security Scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.3.2
+
+      - name: Install safety (vulnerability scanner)
+        run: |
+          pip install --upgrade pip
+          pip install safety bandit
+
+      - name: Scan Python dependencies for vulnerabilities
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "Scanning Python Dependencies"
+          echo "=========================================="
+
+          VULN_FOUND=false
+
+          for project_file in samples/payloadapps/python/*/pyproject.toml; do
+            if [ -f "$project_file" ]; then
+              project_dir=$(dirname "$project_file")
+              project_name=$(basename "$project_dir")
+
+              echo ""
+              echo "Scanning: $project_name"
+              echo "----------------------------------------"
+
+              cd "$project_dir"
+
+              # Export requirements for safety scan
+              poetry export -f requirements.txt --output requirements.txt --without-hashes 2>/dev/null || {
+                echo "⚠️  Could not export requirements for $project_name"
+                cd - > /dev/null
+                continue
+              }
+
+              # Run safety check
+              echo "Running Safety scan..."
+              safety check --file=requirements.txt --output=text || {
+                echo "⚠️  Vulnerabilities found in $project_name"
+                VULN_FOUND=true
+              }
+
+              # Clean up
+              rm -f requirements.txt
+
+              cd - > /dev/null
+            fi
+          done
+
+          echo ""
+          echo "=========================================="
+          if [ "$VULN_FOUND" = true ]; then
+            echo "⚠️  Vulnerabilities detected - review above output"
+            echo "Note: Not failing build, review findings"
+          else
+            echo "✅ No known vulnerabilities found"
+          fi
+          echo "=========================================="
+
+      - name: Run Bandit (Python security linter)
+        continue-on-error: true
+        run: |
+          echo "Running Bandit security linter..."
+
+          for project_dir in samples/payloadapps/python/*/; do
+            if [ -d "$project_dir/src" ]; then
+              project_name=$(basename "$project_dir")
+              echo "Scanning: $project_name"
+
+              bandit -r "$project_dir/src" \
+                -f json \
+                -o "bandit-$project_name.json" \
+                --severity-level medium || {
+                echo "⚠️  Security issues found in $project_name"
+              }
+            fi
+          done
+
+          echo "✅ Bandit scan complete"
+
+      - name: Upload Bandit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-results
+          path: bandit-*.json
+          retention-days: 30
+
+  # ============================================================================
+  # .NET Dependency Vulnerability Scanning
+  # ============================================================================
+  dotnet-security:
+    name: ".NET Security Scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            8.0.x
+
+      - name: Restore .NET packages
+        run: |
+          echo "Restoring .NET packages for vulnerability scanning..."
+
+          for csproj_file in samples/payloadapps/dotnet/**/*.csproj samples/plugins/**/*.csproj; do
+            if [ -f "$csproj_file" ] && [[ ! "$csproj_file" =~ debugPayloadApp ]]; then
+              dotnet restore "$csproj_file" --ignore-failed-sources --verbosity quiet || true
+            fi
+          done
+
+      - name: Check for vulnerable packages
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "Scanning .NET Dependencies for Vulnerabilities"
+          echo "=========================================="
+
+          VULN_FOUND=false
+
+          for csproj_file in samples/payloadapps/dotnet/**/*.csproj samples/plugins/**/*.csproj; do
+            if [ -f "$csproj_file" ] && [[ ! "$csproj_file" =~ debugPayloadApp ]]; then
+              project_name=$(basename "$csproj_file" .csproj)
+
+              echo ""
+              echo "Scanning: $project_name"
+              echo "----------------------------------------"
+
+              # List vulnerable packages
+              dotnet list "$csproj_file" package --vulnerable --include-transitive 2>&1 | tee vuln-output.txt
+
+              # Check if vulnerabilities were found
+              if grep -q "has the following vulnerable packages" vuln-output.txt; then
+                echo "⚠️  Vulnerabilities found in $project_name"
+                VULN_FOUND=true
+              fi
+
+              rm -f vuln-output.txt
+            fi
+          done
+
+          echo ""
+          echo "=========================================="
+          if [ "$VULN_FOUND" = true ]; then
+            echo "⚠️  Vulnerabilities detected - review above output"
+            echo "Consider updating vulnerable packages"
+          else
+            echo "✅ No known vulnerabilities found"
+          fi
+          echo "=========================================="
+
+      - name: Check for deprecated packages
+        run: |
+          echo "Checking for deprecated .NET packages..."
+
+          for csproj_file in samples/payloadapps/dotnet/**/*.csproj samples/plugins/**/*.csproj; do
+            if [ -f "$csproj_file" ] && [[ ! "$csproj_file" =~ debugPayloadApp ]]; then
+              project_name=$(basename "$csproj_file" .csproj)
+
+              dotnet list "$csproj_file" package --deprecated 2>&1 | grep -A 5 "deprecated" || {
+                echo "No deprecated packages in $project_name"
+              }
+            fi
+          done
+
+  # ============================================================================
+  # Filesystem and Secret Scanning
+  # ============================================================================
+  secret-scan:
+    name: "Secret Scanning"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for comprehensive scanning
+
+      - name: Install TruffleHog
+        run: |
+          # Install TruffleHog for secret scanning
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run TruffleHog scan
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "Scanning for Secrets with TruffleHog"
+          echo "=========================================="
+
+          # Scan repository for secrets
+          trufflehog filesystem . \
+            --json \
+            --exclude-paths=.github/workflows/security-scan.yml \
+            > trufflehog-results.json || {
+            echo "⚠️  Potential secrets detected"
+          }
+
+          # Display findings
+          if [ -s trufflehog-results.json ]; then
+            echo "Findings:"
+            cat trufflehog-results.json | jq -r '.DetectorName + ": " + .Raw' | head -20
+            echo ""
+            echo "⚠️  Review trufflehog-results.json artifact for details"
+          else
+            echo "✅ No secrets detected"
+          fi
+
+      - name: Upload TruffleHog results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trufflehog-results
+          path: trufflehog-results.json
+          retention-days: 30
+
+      - name: Check for common secret patterns
+        run: |
+          echo "Checking for common secret patterns..."
+
+          # Check for potential API keys, tokens, passwords
+          find samples/ -type f \( -name "*.py" -o -name "*.cs" -o -name "*.json" -o -name "*.yaml" \) \
+            -exec grep -l -i "api[_-]key\|password\|secret\|token" {} \; | while read -r file; do
+            echo "⚠️  File contains potential secret keywords: $file"
+            echo "Please verify these are not hardcoded secrets"
+          done || echo "✅ No obvious secret patterns found"
+
+      - name: Check for exposed credentials in config files
+        run: |
+          echo "Checking configuration files..."
+
+          # Look for .env files (should be gitignored)
+          find . -name ".env" -o -name ".env.*" | while read -r file; do
+            echo "⚠️  Found .env file (should be in .gitignore): $file"
+          done
+
+          # Check for credentials in JSON/YAML
+          find samples/ -name "*.json" -o -name "*.yaml" -o -name "*.yml" | while read -r file; do
+            if grep -qi "password\|secret\|credential" "$file"; then
+              echo "⚠️  Potential credentials in: $file"
+            fi
+          done || echo "✅ No obvious credentials in config files"
+
+  # ============================================================================
+  # Container Image Scanning
+  # ============================================================================
+  container-scan:
+    name: "Container Image Scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          # Install Trivy scanner
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Scan Dockerfiles for misconfigurations
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "Scanning Dockerfiles for Security Issues"
+          echo "=========================================="
+
+          for dockerfile in samples/payloadapps/*/docker/Dockerfile.prod; do
+            if [ -f "$dockerfile" ]; then
+              app_name=$(basename $(dirname $(dirname "$dockerfile")))
+
+              echo ""
+              echo "Scanning: $app_name"
+              echo "----------------------------------------"
+
+              trivy config "$dockerfile" \
+                --severity CRITICAL,HIGH \
+                --exit-code 0 \
+                --format table || {
+                echo "⚠️  Issues found in $dockerfile"
+              }
+            fi
+          done
+
+          echo ""
+          echo "✅ Dockerfile scan complete"
+
+      - name: Generate Trivy SARIF report
+        run: |
+          echo "Generating SARIF reports for Dockerfiles..."
+
+          # Scan all Dockerfiles and generate SARIF
+          trivy config samples/ \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --format sarif \
+            --output trivy-dockerfile-results.sarif || true
+
+      - name: Upload Trivy results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-dockerfile-results.sarif'
+          category: 'dockerfile-security'
+
+  # ============================================================================
+  # License Compliance Scanning
+  # ============================================================================
+  license-scan:
+    name: "License Compliance"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install license checking tools
+        run: |
+          pip install pip-licenses licensecheck
+
+      - name: Check Python package licenses
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "Checking Python Package Licenses"
+          echo "=========================================="
+
+          for project_file in samples/payloadapps/python/*/pyproject.toml; do
+            if [ -f "$project_file" ]; then
+              project_dir=$(dirname "$project_file")
+              project_name=$(basename "$project_dir")
+
+              echo ""
+              echo "Project: $project_name"
+              echo "----------------------------------------"
+
+              cd "$project_dir"
+
+              # Try to check licenses (may fail due to missing SDK wheel)
+              pip-licenses --format=markdown --order=license 2>/dev/null || {
+                echo "ℹ️  Could not generate license report for $project_name"
+              }
+
+              cd - > /dev/null
+            fi
+          done
+
+          echo ""
+          echo "✅ License check complete"
+
+      - name: Check for restrictive licenses
+        run: |
+          echo "Checking for GPL and other restrictive licenses..."
+
+          # This is a basic check - customize based on your license policy
+          find samples/ -name "LICENSE*" -o -name "COPYING*" | while read -r license_file; do
+            if grep -qi "GPL\|AGPL" "$license_file"; then
+              echo "⚠️  Potential GPL license found: $license_file"
+              echo "Review if this is compatible with your license policy"
+            fi
+          done || echo "✅ No restrictive licenses detected"
+
+  # ============================================================================
+  # Supply Chain Security
+  # ============================================================================
+  supply-chain:
+    name: "Supply Chain Security"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.3.2
+
+      - name: Check for dependency confusion risks
+        run: |
+          echo "=========================================="
+          echo "Checking for Dependency Confusion Risks"
+          echo "=========================================="
+
+          # Check for packages that might be subject to dependency confusion
+          for project_file in samples/payloadapps/python/*/pyproject.toml; do
+            if [ -f "$project_file" ]; then
+              project_name=$(basename "$(dirname "$project_file")")
+
+              echo "Checking: $project_name"
+
+              # Look for local path dependencies
+              if grep -q "path = " "$project_file"; then
+                echo "⚠️  Local path dependencies found in $project_name"
+                echo "Ensure these are properly handled in production builds"
+              fi
+            fi
+          done
+
+          echo "✅ Dependency confusion check complete"
+
+      - name: Verify dependency lock files
+        run: |
+          echo "Verifying Poetry lock files..."
+
+          for lock_file in samples/payloadapps/python/*/poetry.lock; do
+            if [ -f "$lock_file" ]; then
+              project_dir=$(dirname "$lock_file")
+              project_name=$(basename "$project_dir")
+
+              cd "$project_dir"
+
+              # Verify lock file is up-to-date
+              poetry check 2>&1 || {
+                echo "⚠️  Lock file may be out of sync in $project_name"
+              }
+
+              cd - > /dev/null
+            fi
+          done
+
+          echo "✅ Lock file verification complete"
+
+  # ============================================================================
+  # Security Summary
+  # ============================================================================
+  security-summary:
+    name: "Security Summary"
+    runs-on: ubuntu-latest
+    needs:
+      - python-security
+      - dotnet-security
+      - secret-scan
+      - container-scan
+      - license-scan
+      - supply-chain
+    if: always()
+
+    steps:
+      - name: Generate security summary
+        run: |
+          echo "=========================================="
+          echo "Security Scanning Summary"
+          echo "=========================================="
+          echo "Python Security: ${{ needs.python-security.result }}"
+          echo ".NET Security: ${{ needs.dotnet-security.result }}"
+          echo "Secret Scanning: ${{ needs.secret-scan.result }}"
+          echo "Container Scanning: ${{ needs.container-scan.result }}"
+          echo "License Compliance: ${{ needs.license-scan.result }}"
+          echo "Supply Chain: ${{ needs.supply-chain.result }}"
+          echo "=========================================="
+          echo ""
+          echo "Review the Security tab for detailed findings:"
+          echo "https://github.com/${{ github.repository }}/security"
+          echo ""
+          echo "For space/embedded systems, critical security areas:"
+          echo "  ✓ Resource exhaustion protection"
+          echo "  ✓ Input validation and sanitization"
+          echo "  ✓ Cryptographic security"
+          echo "  ✓ Dependency vulnerabilities"
+          echo "  ✓ Supply chain integrity"
+          echo "=========================================="
+
+          # Note: We use continue-on-error for scans, so we report but don't fail
+          echo "ℹ️  Security scans completed - review findings above"
+
+      - name: Create issue for critical findings
+        if: github.event_name == 'schedule' && (needs.python-security.result == 'failure' || needs.dotnet-security.result == 'failure')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🔒 Security Scan Findings - ' + new Date().toISOString().split('T')[0],
+              body: `## Security Scan Alert
+
+            Automated security scanning has detected potential vulnerabilities.
+
+            **Scan Results:**
+            - Python Security: ${{ needs.python-security.result }}
+            - .NET Security: ${{ needs.dotnet-security.result }}
+            - Secret Scanning: ${{ needs.secret-scan.result }}
+            - Container Scanning: ${{ needs.container-scan.result }}
+
+            **Action Required:**
+            1. Review the [workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            2. Check the [Security tab](https://github.com/${{ github.repository }}/security)
+            3. Address critical and high severity findings
+            4. Update dependencies as needed
+
+            This issue was automatically created by the security scanning workflow.
+            `,
+              labels: ['security', 'automated']
+            });

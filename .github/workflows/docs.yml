@@ -1,0 +1,579 @@
+name: "Documentation"
+
+# ============================================================================
+# Documentation Validation and Publishing Pipeline
+#
+# This workflow provides comprehensive documentation validation:
+# - Markdown linting and formatting
+# - Link checking (internal and external)
+# - Spell checking
+# - Documentation structure validation
+# - README completeness checking
+# - API documentation generation (if applicable)
+# ============================================================================
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'docs/**'
+      - '**.md'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'docs/**'
+      - '**.md'
+  schedule:
+    # Weekly check for broken links
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+# Prevent concurrent documentation builds
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  # ============================================================================
+  # Markdown Linting and Formatting
+  # ============================================================================
+  markdown-lint:
+    name: "Markdown Linting"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@v15
+        with:
+          globs: |
+            **/*.md
+            !**/node_modules/**
+            !**/.venv/**
+
+      - name: Check markdown formatting
+        continue-on-error: true
+        run: |
+          echo "Checking markdown file formatting..."
+
+          # Check for trailing whitespace
+          if grep -r -n ' $' --include='*.md' docs/ README.md 2>/dev/null; then
+            echo "⚠️  Trailing whitespace found in markdown files"
+            echo "Consider running: sed -i 's/[[:space:]]*$//' file.md"
+          fi
+
+          # Check for mixed line endings
+          if find docs/ README.md -name '*.md' -exec file {} \; | grep -i CRLF; then
+            echo "⚠️  Mixed line endings found (CRLF)"
+            echo "Use: dos2unix or configure git to handle line endings"
+          fi
+
+          echo "✅ Markdown formatting check complete"
+
+  # ============================================================================
+  # Spell Checking
+  # ============================================================================
+  spell-check:
+    name: "Spell Check"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install codespell
+        run: |
+          pip install codespell
+
+      - name: Create custom dictionary
+        run: |
+          # Create a custom dictionary for technical terms, product names, etc.
+          cat > .codespell-ignore <<EOF
+          SpaceFX
+          spacefx
+          DAPR
+          dapr
+          kubernetes
+          k3s
+          amd64
+          arm64
+          dockerfile
+          dotnet
+          csproj
+          pyproject
+          TOML
+          YAML
+          JSON
+          SDK
+          API
+          MQTT
+          gRPC
+          protobuf
+          proto
+          NuGet
+          PyPI
+          GHCR
+          ghcr
+          io
+          dev
+          github
+          OAuth
+          workflow
+          CI
+          CD
+          EOF
+
+      - name: Run spell checker
+        continue-on-error: true
+        run: |
+          echo "Running spell checker on documentation..."
+
+          codespell \
+            --ignore-words .codespell-ignore \
+            --skip="*.pyc,*.png,*.jpg,*.gif,*.svg,*.pdf,node_modules,.git,.venv,*.lock" \
+            docs/ \
+            README.md \
+            CONTRIBUTING.md \
+            CLAUDE.md \
+            SECURITY.md || {
+            echo "⚠️  Potential spelling issues found (review above)"
+            echo "This is informational and won't fail the build"
+          }
+
+          echo "✅ Spell check complete"
+
+  # ============================================================================
+  # Link Validation
+  # ============================================================================
+  link-check:
+    name: "Link Validation"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install markdown-link-check
+        run: npm install -g markdown-link-check
+
+      - name: Create link check configuration
+        run: |
+          cat > .markdown-link-check.json <<EOF
+          {
+            "ignorePatterns": [
+              {
+                "pattern": "^http://localhost"
+              },
+              {
+                "pattern": "^https://localhost"
+              },
+              {
+                "pattern": "registry.spacefx.local"
+              }
+            ],
+            "replacementPatterns": [],
+            "httpHeaders": [
+              {
+                "urls": ["https://github.com"],
+                "headers": {
+                  "Accept": "application/vnd.github+json"
+                }
+              }
+            ],
+            "timeout": "10s",
+            "retryOn429": true,
+            "retryCount": 3,
+            "fallbackRetryDelay": "5s",
+            "aliveStatusCodes": [200, 206, 301, 302, 307, 308, 403]
+          }
+          EOF
+
+      - name: Check links in documentation
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "Checking Links in Documentation"
+          echo "=========================================="
+
+          BROKEN_LINKS=0
+
+          # Check all markdown files
+          find docs/ -name '*.md' | while read -r file; do
+            echo ""
+            echo "Checking: $file"
+
+            markdown-link-check "$file" \
+              --config .markdown-link-check.json \
+              --quiet || {
+              echo "⚠️  Broken links found in $file"
+              BROKEN_LINKS=$((BROKEN_LINKS + 1))
+            }
+          done
+
+          # Check README files
+          for readme in README.md CONTRIBUTING.md SECURITY.md CLAUDE.md; do
+            if [ -f "$readme" ]; then
+              echo ""
+              echo "Checking: $readme"
+
+              markdown-link-check "$readme" \
+                --config .markdown-link-check.json \
+                --quiet || {
+                echo "⚠️  Broken links found in $readme"
+              }
+            fi
+          done
+
+          echo ""
+          echo "=========================================="
+          if [ $BROKEN_LINKS -gt 0 ]; then
+            echo "⚠️  Found broken links (review above)"
+            echo "Note: External link failures may be transient"
+          else
+            echo "✅ All links validated successfully"
+          fi
+          echo "=========================================="
+
+      - name: Check internal references
+        run: |
+          echo "Checking internal file references..."
+
+          # Find all markdown links to local files
+          grep -r -h '\[.*\](\..*\.md)' docs/ README.md 2>/dev/null | \
+            grep -o '(\..*\.md)' | \
+            tr -d '()' | \
+            while read -r link; do
+              # Resolve relative path
+              if [ ! -f "$link" ]; then
+                echo "⚠️  Broken internal reference: $link"
+              fi
+            done || echo "✅ Internal references validated"
+
+  # ============================================================================
+  # Documentation Structure Validation
+  # ============================================================================
+  validate-structure:
+    name: "Validate Documentation Structure"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate documentation structure
+        run: |
+          echo "=========================================="
+          echo "Validating Documentation Structure"
+          echo "=========================================="
+
+          # Check for required documentation files
+          REQUIRED_DOCS=(
+            "README.md"
+            "CONTRIBUTING.md"
+            "SECURITY.md"
+            "LICENSE"
+            "CODE_OF_CONDUCT.md"
+            "CLAUDE.md"
+          )
+
+          MISSING_DOCS=0
+
+          for doc in "${REQUIRED_DOCS[@]}"; do
+            if [ ! -f "$doc" ]; then
+              echo "❌ Missing required file: $doc"
+              MISSING_DOCS=$((MISSING_DOCS + 1))
+            else
+              echo "✅ Found: $doc"
+            fi
+          done
+
+          if [ $MISSING_DOCS -gt 0 ]; then
+            echo ""
+            echo "❌ $MISSING_DOCS required documentation files are missing"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ All required documentation files present"
+
+      - name: Check README completeness
+        run: |
+          echo "Checking README.md completeness..."
+
+          README="README.md"
+
+          # Check for essential sections
+          SECTIONS=(
+            "# "
+            "## "
+            "Installation"
+            "Usage"
+            "Contributing"
+            "License"
+          )
+
+          MISSING_SECTIONS=0
+
+          for section in "${SECTIONS[@]}"; do
+            if ! grep -q "$section" "$README"; then
+              echo "⚠️  README may be missing section: $section"
+              MISSING_SECTIONS=$((MISSING_SECTIONS + 1))
+            fi
+          done
+
+          if [ $MISSING_SECTIONS -gt 0 ]; then
+            echo "ℹ️  Consider adding missing sections to README.md"
+          else
+            echo "✅ README appears complete"
+          fi
+
+      - name: Check for sample README files
+        run: |
+          echo "Checking sample applications for README files..."
+
+          # Python samples
+          for sample_dir in samples/payloadapps/python/*/; do
+            if [ -d "$sample_dir" ]; then
+              sample_name=$(basename "$sample_dir")
+
+              if [ ! -f "$sample_dir/README.md" ]; then
+                echo "⚠️  Missing README: $sample_name"
+              else
+                echo "✅ $sample_name has README"
+              fi
+            fi
+          done
+
+          # .NET samples
+          for sample_dir in samples/payloadapps/dotnet/*/; do
+            if [ -d "$sample_dir" ]; then
+              sample_name=$(basename "$sample_dir")
+
+              if [ ! -f "$sample_dir/README.md" ]; then
+                echo "⚠️  Missing README: $sample_name"
+              else
+                echo "✅ $sample_name has README"
+              fi
+            fi
+          done
+
+      - name: Check documentation organization
+        run: |
+          echo "Checking documentation organization..."
+
+          # Check for expected doc directories
+          DOC_DIRS=(
+            "docs/architecture"
+            "docs/setup"
+            "docs/personas"
+            "docs/tools"
+          )
+
+          for dir in "${DOC_DIRS[@]}"; do
+            if [ -d "$dir" ]; then
+              file_count=$(find "$dir" -name "*.md" | wc -l)
+              echo "✅ $dir: $file_count markdown files"
+            else
+              echo "ℹ️  Optional directory not found: $dir"
+            fi
+          done
+
+  # ============================================================================
+  # Code Documentation
+  # ============================================================================
+  code-docs:
+    name: "Code Documentation"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Python docstrings
+        continue-on-error: true
+        run: |
+          echo "Checking Python docstring coverage..."
+
+          pip install interrogate
+
+          for sample_dir in samples/payloadapps/python/*/src; do
+            if [ -d "$sample_dir" ]; then
+              echo "Checking: $sample_dir"
+
+              interrogate "$sample_dir" \
+                --verbose \
+                --ignore-init-method \
+                --ignore-init-module \
+                --fail-under=50 || {
+                echo "ℹ️  Low docstring coverage in $sample_dir"
+              }
+            fi
+          done
+
+          echo "✅ Docstring check complete"
+
+      - name: Check for code comments
+        run: |
+          echo "Analyzing code comment density..."
+
+          for lang_dir in samples/payloadapps/python samples/payloadapps/dotnet; do
+            if [ -d "$lang_dir" ]; then
+              echo "Directory: $lang_dir"
+
+              # Count total lines and comment lines
+              if [[ "$lang_dir" == *"python"* ]]; then
+                total_lines=$(find "$lang_dir" -name "*.py" -exec wc -l {} + | tail -1 | awk '{print $1}')
+                comment_lines=$(find "$lang_dir" -name "*.py" -exec grep -h "^[[:space:]]*#" {} + | wc -l)
+              else
+                total_lines=$(find "$lang_dir" -name "*.cs" -exec wc -l {} + | tail -1 | awk '{print $1}')
+                comment_lines=$(find "$lang_dir" -name "*.cs" -exec grep -h "^[[:space:]]*//" {} + | wc -l)
+              fi
+
+              if [ "$total_lines" -gt 0 ]; then
+                comment_ratio=$(awk "BEGIN {printf \"%.1f\", ($comment_lines/$total_lines)*100}")
+                echo "  Lines: $total_lines"
+                echo "  Comments: $comment_lines"
+                echo "  Ratio: $comment_ratio%"
+
+                if (( $(echo "$comment_ratio < 10" | bc -l) )); then
+                  echo "  ℹ️  Consider adding more code comments"
+                fi
+              fi
+            fi
+          done
+
+  # ============================================================================
+  # Generate Documentation Report
+  # ============================================================================
+  generate-report:
+    name: "Documentation Report"
+    runs-on: ubuntu-latest
+    needs:
+      - markdown-lint
+      - spell-check
+      - link-check
+      - validate-structure
+      - code-docs
+    if: always()
+    timeout-minutes: 10
+
+    steps:
+      - name: Generate documentation report
+        run: |
+          echo "=========================================="
+          echo "Documentation Pipeline Summary"
+          echo "=========================================="
+          echo "Markdown Linting: ${{ needs.markdown-lint.result }}"
+          echo "Spell Check: ${{ needs.spell-check.result }}"
+          echo "Link Validation: ${{ needs.link-check.result }}"
+          echo "Structure Validation: ${{ needs.validate-structure.result }}"
+          echo "Code Documentation: ${{ needs.code-docs.result }}"
+          echo "=========================================="
+
+          # Determine overall status
+          if [ "${{ needs.markdown-lint.result }}" = "failure" ] || \
+             [ "${{ needs.validate-structure.result }}" = "failure" ]; then
+            echo "❌ Documentation validation failed"
+            exit 1
+          fi
+
+          if [ "${{ needs.spell-check.result }}" != "success" ] || \
+             [ "${{ needs.link-check.result }}" != "success" ]; then
+            echo "⚠️  Some checks reported warnings (not failing build)"
+          fi
+
+          echo "✅ Documentation validation completed"
+
+      - name: Add PR comment (on pull requests)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const summary = `## Documentation Validation Results
+
+            | Check | Status |
+            |-------|--------|
+            | Markdown Linting | ${{ needs.markdown-lint.result == 'success' && '✅' || '❌' }} |
+            | Spell Check | ${{ needs.spell-check.result == 'success' && '✅' || '⚠️' }} |
+            | Link Validation | ${{ needs.link-check.result == 'success' && '✅' || '⚠️' }} |
+            | Structure Validation | ${{ needs.validate-structure.result == 'success' && '✅' || '❌' }} |
+            | Code Documentation | ${{ needs.code-docs.result == 'success' && '✅' || '⚠️' }} |
+
+            ### Recommendations
+            - Review any warnings above
+            - Fix broken links and spelling issues
+            - Ensure all samples have README files
+            - Maintain good code documentation
+
+            **Note:** ⚠️ warnings are informational and don't block the build.
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      - name: Create issue for broken links (scheduled runs only)
+        if: github.event_name == 'schedule' && needs.link-check.result != 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '📝 Documentation: Broken Links Detected',
+              body: `## Broken Links Found in Documentation
+
+            The weekly documentation check has detected broken links.
+
+            **Action Required:**
+            1. Review the [workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            2. Fix or update broken links
+            3. Consider if external links need to be archived or replaced
+
+            **Common Fixes:**
+            - Update outdated URLs
+            - Replace dead links with archived versions (web.archive.org)
+            - Remove links to deprecated resources
+            - Fix typos in internal references
+
+            This issue was automatically created by the documentation validation workflow.
+            `,
+              labels: ['documentation', 'automated']
+            });
+
+      - name: Status badge info
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "Add the following to your README for status badges:"
+          echo ""
+          echo "[![Documentation](https://github.com/${{ github.repository }}/actions/workflows/docs.yml/badge.svg)](https://github.com/${{ github.repository }}/actions/workflows/docs.yml)"

@@ -1,0 +1,257 @@
+name: "CodeQL Security Scanning"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      # Only trigger on code changes, not documentation
+      - '**.py'
+      - '**.cs'
+      - '**.csproj'
+      - 'pyproject.toml'
+      - 'poetry.lock'
+      - '.github/workflows/codeql.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '**.py'
+      - '**.cs'
+      - '**.csproj'
+      - 'pyproject.toml'
+      - 'poetry.lock'
+  schedule:
+    # Run weekly on Sundays at 00:00 UTC to catch new vulnerabilities
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    # Allow manual triggering for ad-hoc security reviews
+
+# Prevent concurrent CodeQL scans to avoid resource contention
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    permissions:
+      # Required for all workflows
+      security-events: write
+      # Required to fetch internal or private CodeQL packs
+      packages: read
+      # Required for workflows in private repositories
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Python language analysis
+          - language: python
+            build-mode: none
+            os: ubuntu-latest
+
+          # C#/.NET language analysis
+          - language: csharp
+            build-mode: manual
+            os: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        # Fetch full history for better analysis context
+        fetch-depth: 0
+
+    # ============================================================================
+    # Python-specific setup
+    # ============================================================================
+    - name: Set up Python
+      if: matrix.language == 'python'
+      uses: actions/setup-python@v5
+      with:
+        # Match the Python version range used in the SDK (3.8-3.11)
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Poetry
+      if: matrix.language == 'python'
+      uses: snok/install-poetry@v1
+      with:
+        version: 1.3.2
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+
+    - name: Cache Poetry dependencies
+      if: matrix.language == 'python'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pypoetry
+          **/samples/payloadapps/python/**/.venv
+        key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-poetry-
+
+    - name: Install Python dependencies
+      if: matrix.language == 'python'
+      run: |
+        # Install dependencies for all Python sample apps
+        echo "Installing Python dependencies for CodeQL analysis..."
+
+        # Find all pyproject.toml files in Python samples
+        for project_file in samples/payloadapps/python/*/pyproject.toml; do
+          if [ -f "$project_file" ]; then
+            project_dir=$(dirname "$project_file")
+            echo "Processing: $project_dir"
+            cd "$project_dir"
+
+            # Remove local wheel dependency that won't be available in CI
+            if [ -f "pyproject.toml" ]; then
+              # Install dependencies, skipping local wheels that don't exist
+              poetry install --no-interaction --no-root --only main 2>&1 | tee install.log || {
+                echo "Warning: Some dependencies failed to install in $project_dir"
+                echo "This is expected for local SDK wheel dependencies"
+              }
+            fi
+
+            cd - > /dev/null
+          fi
+        done
+
+        # Install common Python security/analysis tools
+        pip install --upgrade pip setuptools wheel
+
+        echo "Python dependency installation complete"
+
+    # ============================================================================
+    # .NET/C#-specific setup
+    # ============================================================================
+    - name: Setup .NET
+      if: matrix.language == 'csharp'
+      uses: actions/setup-dotnet@v4
+      with:
+        # Support both .NET 6.0 and .NET 8.0 as used in the SDK
+        dotnet-version: |
+          6.0.x
+          8.0.x
+
+    - name: Cache .NET packages
+      if: matrix.language == 'csharp'
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+
+    # ============================================================================
+    # Initialize CodeQL
+    # ============================================================================
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.build-mode }}
+
+        # Use extended query suites for comprehensive security analysis
+        # security-extended includes additional security checks beyond the default
+        queries: security-extended,security-and-quality
+
+        # Configure paths to scan - focus on sample applications
+        paths:
+          - 'samples/payloadapps'
+          - 'samples/plugins'
+          - 'samples/datagenerator'
+
+        # Exclude generated code, test data, and third-party content
+        paths-ignore:
+          - '**/__pycache__'
+          - '**/node_modules'
+          - '**/bin'
+          - '**/obj'
+          - '**/.venv'
+          - '**/venv'
+          - '**/.protos'
+          - '**/.wheel'
+          - '**/model'
+          - '**/data'
+          - '**/*.md'
+          - 'docs/**'
+
+    # ============================================================================
+    # Build step (required for compiled languages like C#)
+    # ============================================================================
+    - name: Build .NET projects
+      if: matrix.language == 'csharp'
+      run: |
+        echo "Building .NET sample applications..."
+
+        # Find and build all .NET projects
+        for csproj_file in samples/payloadapps/dotnet/**/*.csproj samples/plugins/**/*.csproj; do
+          if [ -f "$csproj_file" ]; then
+            echo "Building: $csproj_file"
+
+            # Restore and build (skip local NuGet packages that won't be available)
+            dotnet restore "$csproj_file" --ignore-failed-sources || {
+              echo "Warning: Restore failed for $csproj_file - continuing with build attempt"
+            }
+
+            dotnet build "$csproj_file" --no-restore --configuration Release -p:TreatWarningsAsErrors=false || {
+              echo "Warning: Build failed for $csproj_file - CodeQL will analyze available code"
+            }
+          fi
+        done
+
+        echo ".NET build process complete"
+
+    # ============================================================================
+    # Perform CodeQL Analysis
+    # ============================================================================
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{ matrix.language }}"
+        # Upload SARIF results even if there are no findings
+        upload: true
+        # Generate detailed output for debugging
+        output: sarif-results
+
+    # ============================================================================
+    # Upload SARIF results as artifact for review
+    # ============================================================================
+    - name: Upload SARIF results as artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: codeql-sarif-${{ matrix.language }}
+        path: sarif-results/${{ matrix.language }}.sarif
+        retention-days: 30
+
+    # ============================================================================
+    # Post-analysis summary
+    # ============================================================================
+    - name: CodeQL Analysis Summary
+      if: always()
+      run: |
+        echo "=========================================="
+        echo "CodeQL Security Scanning Complete"
+        echo "=========================================="
+        echo "Language: ${{ matrix.language }}"
+        echo "Analysis Mode: ${{ matrix.build-mode }}"
+        echo "Query Suites: security-extended, security-and-quality"
+        echo ""
+        echo "Results have been uploaded to the Security tab:"
+        echo "https://github.com/${{ github.repository }}/security/code-scanning"
+        echo ""
+        echo "For space/embedded systems, review findings for:"
+        echo "  - Resource exhaustion vulnerabilities"
+        echo "  - Memory safety issues"
+        echo "  - Concurrent execution risks"
+        echo "  - Input validation gaps"
+        echo "  - Cryptographic weaknesses"
+        echo "=========================================="
