@@ -14,12 +14,14 @@ RUN pip install --no-cache-dir poetry
 
 # Install .NET 6 SDK
 RUN apt-get update \
-    && apt-get install -y wget apt-transport-https \
+    && apt-get install -y --no-install-recommends wget apt-transport-https \
     && wget https://packages.microsoft.com/config/debian/11/packages-microsoft-prod.deb -O packages-microsoft-prod.deb \
     && dpkg -i packages-microsoft-prod.deb \
     && apt-get update \
-    && apt-get install -y aspnetcore-runtime-6.0 \
-    && rm packages-microsoft-prod.deb
+    && apt-get install -y --no-install-recommends aspnetcore-runtime-6.0 \
+    && rm packages-microsoft-prod.deb \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user and group
 RUN groupadd --gid 1000 spaceuser \
@@ -31,8 +33,13 @@ COPY --chown=spaceuser:spaceuser . .
 # Install dependencies without creating a virtual environment
 RUN poetry config virtualenvs.create false && poetry install --no-dev
 
+# Create necessary directories with proper permissions
+RUN mkdir -p /var/spacedev/xfer/app-python-shipdetector-onnx/inbox \
+    && mkdir -p /var/spacedev/xfer/app-python-shipdetector-onnx/outbox \
+    && chown -R spaceuser:spaceuser /var/spacedev
+
 # Switch to the non-root user
-# USER spaceuser
+USER spaceuser
 
 # Run the application
 CMD ["python", "src/app/main.py"]

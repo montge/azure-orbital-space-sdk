@@ -15,12 +15,39 @@ spec:
       labels:
         app: app-python-shipdetector-onnx
     spec:
+      # Pod-level security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: app-python-shipdetector-onnx
-        image: registry.spacefx.local:5000/app-python-shipdetector-onnx:0.11.0-nightly
+        image: registry.spacefx.local:5000/app-python-shipdetector-onnx:0.11.0
         imagePullPolicy: Always
+        # Container-level security context
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+              - ALL
         env:
         - name: DOTNET_SYSTEM_GLOBALIZATION_INVARIANT
           value: "1"
         command: ["python"]
         args: ["/workspace/app-python-shipdetector-onnx/src/app/main.py"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: spacedev-data
+          mountPath: /var/spacedev
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: spacedev-data
+        emptyDir: {}
